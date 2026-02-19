@@ -345,6 +345,10 @@ class AgentLoop:
         
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
         logger.info(f"Response to {msg.channel}:{msg.sender_id}: {preview}")
+
+
+        if session_key == "heartbeat" and final_content.lower().replace("_", " ") == "heartbeat ok":
+            return None
         
         session.add_message("user", msg.content)
         session.add_message("assistant", final_content,
