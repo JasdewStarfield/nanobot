@@ -231,7 +231,13 @@ class GatewayConfig(Base):
     port: int = 18790
 
 
-class WebSearchConfig(Base):
+class HeartbeatConfig(BaseModel):
+    """Heartbeat service configuration."""
+
+    interval_s: int = 30 * 60  # 30 minutes by default
+
+
+class WebSearchConfig(BaseModel):
     """Web search tool configuration."""
 
     api_key: str = ""  # Brave Search API key
@@ -275,6 +281,7 @@ class Config(BaseSettings):
     channels: ChannelsConfig = Field(default_factory=ChannelsConfig)
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
+    heartbeat: HeartbeatConfig = Field(default_factory=HeartbeatConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
 
     @property
