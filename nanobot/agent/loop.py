@@ -168,7 +168,7 @@ class AgentLoop:
         self,
         initial_messages: list[dict],
         on_progress: Callable[[str], Awaitable[None]] | None = None,
-    ) -> tuple[str | None, list[str]]:
+    ) -> tuple[str | None, list[str], list[dict[str, Any]]]:
         """
         Run the agent iteration loop.
 
@@ -177,12 +177,13 @@ class AgentLoop:
             on_progress: Optional callback to push intermediate content to the user.
 
         Returns:
-            Tuple of (final_content, list_of_tools_used).
+            Tuple of (final_content, list_of_tools_used, metadata_messages).
         """
         messages = initial_messages
         iteration = 0
         final_content = None
         tools_used: list[str] = []
+        metadata_messages: list[dict[str, Any]] = []
 
         while iteration < self.max_iterations:
             iteration += 1
@@ -215,6 +216,15 @@ class AgentLoop:
                     messages, response.content, tool_call_dicts,
                     reasoning_content=response.reasoning_content,
                 )
+                assistant_msg: dict[str, Any] = {
+                    "role": "assistant",
+                    "tool_calls": tool_call_dicts,
+                }
+                if response.content:
+                    assistant_msg["content"] = response.content
+                if response.reasoning_content:
+                    assistant_msg["reasoning_content"] = response.reasoning_content
+                metadata_messages.append(assistant_msg)
 
                 for tool_call in response.tool_calls:
                     tools_used.append(tool_call.name)
@@ -224,11 +234,17 @@ class AgentLoop:
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result
                     )
+                    metadata_messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "name": tool_call.name,
+                        "content": result,
+                    })
             else:
                 final_content = self._strip_think(response.content)
                 break
 
-        return final_content, tools_used
+        return final_content, tools_used, metadata_messages
 
     async def run(self) -> None:
         """Run the agent loop, processing messages from the bus."""
@@ -318,7 +334,7 @@ class AgentLoop:
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
                                   content="🐈 nanobot commands:\n/new — Start a new conversation\n/help — Show available commands")
         
-        if len(session.messages) > self.memory_window:
+        if session.count_context_messages() > self.memory_window:
             asyncio.create_task(self._consolidate_memory(session))
 
         self._set_tool_context(msg.channel, msg.chat_id)
@@ -336,7 +352,7 @@ class AgentLoop:
                 metadata=msg.metadata or {},
             ))
 
-        final_content, tools_used = await self._run_agent_loop(
+        final_content, tools_used, metadata_messages = await self._run_agent_loop(
             initial_messages, on_progress=on_progress or _bus_progress,
         )
 
@@ -351,6 +367,12 @@ class AgentLoop:
             return None
         
         session.add_message("user", msg.content)
+        for metadata_message in metadata_messages:
+            session.add_message(
+                metadata_message["role"],
+                metadata_message.get("content", ""),
+                **{k: v for k, v in metadata_message.items() if k not in {"role", "content"}},
+            )
         session.add_message("assistant", final_content,
                             tools_used=tools_used if tools_used else None)
         self.sessions.save(session)
@@ -390,12 +412,18 @@ class AgentLoop:
             channel=origin_channel,
             chat_id=origin_chat_id,
         )
-        final_content, _ = await self._run_agent_loop(initial_messages)
+        final_content, _, metadata_messages = await self._run_agent_loop(initial_messages)
 
         if final_content is None:
             final_content = "Background task completed."
         
         session.add_message("user", f"[System: {msg.sender_id}] {msg.content}")
+        for metadata_message in metadata_messages:
+            session.add_message(
+                metadata_message["role"],
+                metadata_message.get("content", ""),
+                **{k: v for k, v in metadata_message.items() if k not in {"role", "content"}},
+            )
         session.add_message("assistant", final_content)
         self.sessions.save(session)
         

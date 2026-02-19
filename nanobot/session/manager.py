@@ -41,12 +41,38 @@ class Session:
         self.messages.append(msg)
         self.updated_at = datetime.now()
     
+    @staticmethod
+    def _is_context_anchor(message: dict[str, Any]) -> bool:
+        """Return True when a message should count toward history window size."""
+        role = message.get("role")
+        if role == "user":
+            return True
+        if role != "assistant":
+            return False
+        return not message.get("tool_calls")
+
+    def count_context_messages(self) -> int:
+        """Count user/final-assistant messages used for history windowing."""
+        return sum(1 for m in self.messages if self._is_context_anchor(m))
+
     def get_history(self, max_messages: int = 500) -> list[dict[str, Any]]:
-        """Get recent messages in LLM format, preserving tool metadata."""
+        """Get recent messages in LLM format, preserving message metadata."""
+        if max_messages <= 0:
+            return []
+
+        selected: list[dict[str, Any]] = []
+        anchors_seen = 0
+        for m in reversed(self.messages):
+            selected.append(m)
+            if self._is_context_anchor(m):
+                anchors_seen += 1
+                if anchors_seen >= max_messages:
+                    break
+
         out: list[dict[str, Any]] = []
-        for m in self.messages[-max_messages:]:
+        for m in reversed(selected):
             entry: dict[str, Any] = {"role": m["role"], "content": m.get("content", "")}
-            for k in ("tool_calls", "tool_call_id", "name"):
+            for k in ("tool_calls", "tool_call_id", "name", "reasoning_content"):
                 if k in m:
                     entry[k] = m[k]
             out.append(entry)
