@@ -230,7 +230,18 @@ class AgentLoop:
                     tools_used.append(tool_call.name)
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                     logger.info(f"Tool call: {tool_call.name}({args_str[:200]})")
-                    result = await self.tools.execute(tool_call.name, tool_call.arguments)
+
+                # Execute all tool calls for this round concurrently so models
+                # that support parallel tool calling can complete a task in
+                # fewer LLM turns.
+                tool_results = await asyncio.gather(
+                    *[
+                        self.tools.execute(tool_call.name, tool_call.arguments)
+                        for tool_call in response.tool_calls
+                    ]
+                )
+
+                for tool_call, result in zip(response.tool_calls, tool_results, strict=False):
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result
                     )
