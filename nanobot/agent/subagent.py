@@ -157,11 +157,18 @@ class SubagentManager:
                         "tool_calls": tool_call_dicts,
                     })
                     
-                    # Execute tools
+                    # Execute tools concurrently to reduce follow-up rounds.
                     for tool_call in response.tool_calls:
                         args_str = json.dumps(tool_call.arguments)
                         logger.debug(f"Subagent [{task_id}] executing: {tool_call.name} with arguments: {args_str}")
-                        result = await tools.execute(tool_call.name, tool_call.arguments)
+
+                    tool_results = await asyncio.gather(
+                        *[
+                            tools.execute(tool_call.name, tool_call.arguments)
+                            for tool_call in response.tool_calls
+                        ]
+                    )
+                    for tool_call, result in zip(response.tool_calls, tool_results, strict=False):
                         messages.append({
                             "role": "tool",
                             "tool_call_id": tool_call.id,
