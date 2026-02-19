@@ -346,7 +346,7 @@ class AgentLoop:
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
         logger.info(f"Response to {msg.channel}:{msg.sender_id}: {preview}")
 
-
+        # If the session is a heartbeat and the final content is "heartbeat ok", return None to avoid spamming the history with "heartbeat ok" messages.
         if session_key == "heartbeat" and final_content.lower().replace("_", " ") == "heartbeat ok":
             return None
         
