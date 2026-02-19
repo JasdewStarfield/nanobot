@@ -13,11 +13,15 @@ from nanobot.providers.registry import find_by_model, find_gateway
 
 
 COPILOT_DEFAULT_HEADERS: dict[str, str] = {
-    "User-Agent": "GitHubCopilotChat/0.35.0",
-    "Editor-Version": "vscode/1.107.0",
-    "Editor-Plugin-Version": "copilot-chat/0.35.0",
-    "Copilot-Integration-Id": "vscode-chat",
-    "Openai-Intent": "conversation-edits",
+    # Keep keys/values close to known-good Copilot chat headers.
+    # Header names are case-insensitive, but we normalize to lowercase to
+    # avoid duplicate-key collisions when users provide lowercase keys.
+    "user-agent": "GitHubCopilotChat/0.26.7",
+    "editor-version": "vscode/1.95.0",
+    "editor-plugin-version": "copilot-chat/0.26.7",
+    "copilot-integration-id": "vscode-chat",
+    "openai-intent": "conversation-panel",
+    "x-github-api-version": "2025-04-01",
 }
 
 
@@ -139,6 +143,11 @@ class LiteLLMProvider(LLMProvider):
         """Build dynamic request headers for provider-specific behavior."""
         headers = dict(self.extra_headers)
 
+        # Normalize header keys to lowercase for stable merging. HTTP header
+        # names are case-insensitive; this prevents accidental duplicates like
+        # "Editor-Version" + "editor-version".
+        headers = {str(k).lower(): str(v) for k, v in headers.items()}
+
         if model.startswith("github_copilot/"):
             # Copilot IDE-auth endpoints expect editor-identification headers.
             # Without them, requests fail with:
@@ -150,10 +159,10 @@ class LiteLLMProvider(LLMProvider):
             # - user turn => X-Initiator: user
             # - tool/assistant continuation => X-Initiator: agent
             role = self._last_message_role(messages)
-            headers["X-Initiator"] = "user" if role == "user" else "agent"
+            headers["x-initiator"] = "user" if role == "user" else "agent"
 
             if self._has_image_input(messages):
-                headers.setdefault("Copilot-Vision-Request", "true")
+                headers.setdefault("copilot-vision-request", "true")
 
         return headers or None
     
