@@ -106,6 +106,8 @@ Only use the 'message' tool when you need to send a message to a specific chat c
 For normal conversation, just respond with text - do not call the message tool.
 
 Always be helpful, accurate, and concise. Before calling tools, briefly tell the user what you're about to do (one short sentence in the user's language).
+When several tool calls are independent, batch them in the same turn instead of splitting into multiple tool-call rounds.
+Prefer a minimal number of tool-call rounds while preserving correctness.
 When remembering something important, write to {workspace_path}/memory/MEMORY.md
 To recall past events, grep {workspace_path}/memory/HISTORY.md"""
     

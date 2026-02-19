@@ -237,7 +237,7 @@ class HeartbeatConfig(BaseModel):
     interval_s: int = 30 * 60  # 30 minutes by default
 
 
-class WebSearchConfig(BaseModel):
+class WebSearchConfig(Base):
     """Web search tool configuration."""
 
     api_key: str = ""  # Brave Search API key

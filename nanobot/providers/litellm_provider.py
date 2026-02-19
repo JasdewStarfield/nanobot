@@ -12,6 +12,19 @@ from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 from nanobot.providers.registry import find_by_model, find_gateway
 
 
+COPILOT_DEFAULT_HEADERS: dict[str, str] = {
+    # Keep keys/values close to known-good Copilot chat headers.
+    # Header names are case-insensitive, but we normalize to lowercase to
+    # avoid duplicate-key collisions when users provide lowercase keys.
+    "user-agent": "GitHubCopilotChat/0.26.7",
+    "editor-version": "vscode/1.95.0",
+    "editor-plugin-version": "copilot-chat/0.26.7",
+    "copilot-integration-id": "vscode-chat",
+    "openai-intent": "conversation-panel",
+    "x-github-api-version": "2025-04-01",
+}
+
+
 class LiteLLMProvider(LLMProvider):
     """
     LLM provider using LiteLLM for multi-provider support.
@@ -102,6 +115,56 @@ class LiteLLMProvider(LLMProvider):
                 if pattern in model_lower:
                     kwargs.update(overrides)
                     return
+
+    @staticmethod
+    def _last_message_role(messages: list[dict[str, Any]]) -> str | None:
+        """Return the role of the last non-system message."""
+        for msg in reversed(messages):
+            role = msg.get("role")
+            if role and role != "system":
+                return role
+        return None
+
+    @staticmethod
+    def _has_image_input(messages: list[dict[str, Any]]) -> bool:
+        """Check if conversation includes image inputs/results."""
+        for msg in messages:
+            content = msg.get("content")
+            if not isinstance(content, list):
+                continue
+            for item in content:
+                if not isinstance(item, dict):
+                    continue
+                if item.get("type") == "image_url":
+                    return True
+        return False
+
+    def _build_extra_headers(self, model: str, messages: list[dict[str, Any]]) -> dict[str, str] | None:
+        """Build dynamic request headers for provider-specific behavior."""
+        headers = dict(self.extra_headers)
+
+        # Normalize header keys to lowercase for stable merging. HTTP header
+        # names are case-insensitive; this prevents accidental duplicates like
+        # "Editor-Version" + "editor-version".
+        headers = {str(k).lower(): str(v) for k, v in headers.items()}
+
+        if model.startswith("github_copilot/"):
+            # Copilot IDE-auth endpoints expect editor-identification headers.
+            # Without them, requests fail with:
+            # "missing Editor-Version header for IDE auth".
+            for k, v in COPILOT_DEFAULT_HEADERS.items():
+                headers.setdefault(k, v)
+
+            # OpenClaw-style continuation marker:
+            # - user turn => X-Initiator: user
+            # - tool/assistant continuation => X-Initiator: agent
+            role = self._last_message_role(messages)
+            headers["x-initiator"] = "user" if role == "user" else "agent"
+
+            if self._has_image_input(messages):
+                headers.setdefault("copilot-vision-request", "true")
+
+        return headers or None
     
     async def chat(
         self,
@@ -148,13 +211,17 @@ class LiteLLMProvider(LLMProvider):
         if self.api_base:
             kwargs["api_base"] = self.api_base
         
-        # Pass extra headers (e.g. APP-Code for AiHubMix)
-        if self.extra_headers:
-            kwargs["extra_headers"] = self.extra_headers
+        extra_headers = self._build_extra_headers(model, messages)
+        if extra_headers:
+            kwargs["extra_headers"] = extra_headers
         
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
+            # Encourage providers that support parallel function calling to
+            # emit multiple independent tool calls in a single model turn.
+            # This helps reduce extra round-trips without reducing capability.
+            kwargs["parallel_tool_calls"] = True
         
         try:
             response = await acompletion(**kwargs)
