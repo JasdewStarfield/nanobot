@@ -516,7 +516,6 @@ Respond with ONLY valid JSON, no markdown fences."""
             sender_id="user",
             chat_id=chat_id,
             content=content,
-            # metadata={"fromHeartbeat": session_key == "heartbeat"}
         )
         
         response = await self._process_message(msg, session_key=session_key, on_progress=on_progress)
