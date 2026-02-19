@@ -103,10 +103,10 @@ class SubagentManager:
             # Build subagent tools (no message tool, no spawn tool)
             tools = ToolRegistry()
             allowed_dir = self.workspace if self.restrict_to_workspace else None
-            tools.register(ReadFileTool(allowed_dir=allowed_dir))
-            tools.register(WriteFileTool(allowed_dir=allowed_dir))
-            tools.register(EditFileTool(allowed_dir=allowed_dir))
-            tools.register(ListDirTool(allowed_dir=allowed_dir))
+            tools.register(ReadFileTool(allowed_dir=allowed_dir, base_dir=self.workspace))
+            tools.register(WriteFileTool(allowed_dir=allowed_dir, base_dir=self.workspace))
+            tools.register(EditFileTool(allowed_dir=allowed_dir, base_dir=self.workspace))
+            tools.register(ListDirTool(allowed_dir=allowed_dir, base_dir=self.workspace))
             tools.register(ExecTool(
                 working_dir=str(self.workspace),
                 timeout=self.exec_config.timeout,
