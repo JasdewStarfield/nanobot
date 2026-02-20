@@ -65,9 +65,11 @@ class HeartbeatService:
         """Read HEARTBEAT.md content."""
         if self.heartbeat_file.exists():
             try:
-                return self.heartbeat_file.read_text()
-            except Exception:
+                return self.heartbeat_file.read_text(encoding='utf-8')
+            except Exception as e:
+                logger.warning(f"Failed to read HEARTBEAT.md: {e}")
                 return None
+        logger.debug("HEARTBEAT.md does not exist")
         return None
     
     async def start(self) -> None:
