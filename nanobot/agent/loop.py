@@ -112,7 +112,10 @@ class AgentLoop:
         self.tools.register(WebFetchTool())
         
         # Message tool
-        message_tool = MessageTool(send_callback=self.bus.publish_outbound)
+        message_tool = MessageTool(
+            send_callback=self.bus.publish_outbound,
+            sent_record_callback=self._record_sent_message,
+        )
         self.tools.register(message_tool)
         
         # Spawn tool (for subagents)
@@ -146,6 +149,18 @@ class AgentLoop:
         if cron_tool := self.tools.get("cron"):
             if isinstance(cron_tool, CronTool):
                 cron_tool.set_context(channel, chat_id)
+
+    async def _record_sent_message(self, channel: str, chat_id: str, content: str, media: list[str]) -> None:
+        """Mirror sent messages into the destination session as assistant output."""
+        session_key = f"{channel}:{chat_id}"
+        target = self.sessions.get_or_create(session_key)
+        target.add_message(
+            "assistant",
+            content,
+            tools_used=["message"],
+            metadata={"mirrored_from_tool": True, "media": media},
+        )
+        self.sessions.save(target)
 
     @staticmethod
     def _strip_think(text: str | None) -> str | None:
