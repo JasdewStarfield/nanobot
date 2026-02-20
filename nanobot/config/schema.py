@@ -235,6 +235,7 @@ class HeartbeatConfig(BaseModel):
     """Heartbeat service configuration."""
 
     interval_s: int = 30 * 60  # 30 minutes by default
+    context_session_key: str = ""  # Optional: borrow history from this session when running heartbeat
 
 
 class WebSearchConfig(Base):
