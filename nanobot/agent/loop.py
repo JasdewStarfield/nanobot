@@ -112,7 +112,10 @@ class AgentLoop:
         self.tools.register(WebFetchTool())
         
         # Message tool
-        message_tool = MessageTool(send_callback=self.bus.publish_outbound)
+        message_tool = MessageTool(
+            send_callback=self.bus.publish_outbound,
+            sent_record_callback=self._record_sent_message,
+        )
         self.tools.register(message_tool)
         
         # Spawn tool (for subagents)
@@ -146,6 +149,18 @@ class AgentLoop:
         if cron_tool := self.tools.get("cron"):
             if isinstance(cron_tool, CronTool):
                 cron_tool.set_context(channel, chat_id)
+
+    async def _record_sent_message(self, channel: str, chat_id: str, content: str, media: list[str]) -> None:
+        """Mirror sent messages into the destination session as assistant output."""
+        session_key = f"{channel}:{chat_id}"
+        target = self.sessions.get_or_create(session_key)
+        target.add_message(
+            "assistant",
+            content,
+            tools_used=["message"],
+            metadata={"mirrored_from_tool": True, "media": media},
+        )
+        self.sessions.save(target)
 
     @staticmethod
     def _strip_think(text: str | None) -> str | None:
@@ -301,6 +316,7 @@ class AgentLoop:
         self,
         msg: InboundMessage,
         session_key: str | None = None,
+        context_session_key: str | None = None,
         on_progress: Callable[[str], Awaitable[None]] | None = None,
     ) -> OutboundMessage | None:
         """
@@ -309,6 +325,7 @@ class AgentLoop:
         Args:
             msg: The inbound message to process.
             session_key: Override session key (used by process_direct).
+            context_session_key: Optional session key to borrow history from.
             on_progress: Optional callback for intermediate output (defaults to bus publish).
         
         Returns:
@@ -323,6 +340,7 @@ class AgentLoop:
         
         key = session_key or msg.session_key
         session = self.sessions.get_or_create(key)
+        history_session = self.sessions.get_or_create(context_session_key) if context_session_key else session
         
         # Handle slash commands
         cmd = msg.content.strip().lower()
@@ -350,7 +368,7 @@ class AgentLoop:
 
         self._set_tool_context(msg.channel, msg.chat_id)
         initial_messages = self.context.build_messages(
-            history=session.get_history(max_messages=self.memory_window),
+            history=history_session.get_history(max_messages=self.memory_window),
             current_message=msg.content,
             media=msg.media if msg.media else None,
             channel=msg.channel,
@@ -536,6 +554,7 @@ Respond with ONLY valid JSON, no markdown fences."""
         self,
         content: str,
         session_key: str = "cli:direct",
+        context_session_key: str | None = None,
         channel: str = "cli",
         chat_id: str = "direct",
         on_progress: Callable[[str], Awaitable[None]] | None = None,
@@ -546,6 +565,7 @@ Respond with ONLY valid JSON, no markdown fences."""
         Args:
             content: The message content.
             session_key: Session identifier (overrides channel:chat_id for session lookup).
+            context_session_key: Optional session key used only for history context.
             channel: Source channel (for tool context routing).
             chat_id: Source chat ID (for tool context routing).
             on_progress: Optional callback for intermediate output.
@@ -561,5 +581,10 @@ Respond with ONLY valid JSON, no markdown fences."""
             content=content,
         )
         
-        response = await self._process_message(msg, session_key=session_key, on_progress=on_progress)
+        response = await self._process_message(
+            msg,
+            session_key=session_key,
+            context_session_key=context_session_key,
+            on_progress=on_progress,
+        )
         return response.content if response else ""
