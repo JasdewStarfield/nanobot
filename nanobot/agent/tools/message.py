@@ -12,10 +12,12 @@ class MessageTool(Tool):
     def __init__(
         self, 
         send_callback: Callable[[OutboundMessage], Awaitable[None]] | None = None,
+        sent_record_callback: Callable[[str, str, str, list[str]], Awaitable[None]] | None = None,
         default_channel: str = "",
         default_chat_id: str = ""
     ):
         self._send_callback = send_callback
+        self._sent_record_callback = sent_record_callback
         self._default_channel = default_channel
         self._default_chat_id = default_chat_id
     
@@ -88,6 +90,12 @@ class MessageTool(Tool):
         
         try:
             await self._send_callback(msg)
+            if self._sent_record_callback:
+                try:
+                    await self._sent_record_callback(channel, chat_id, content, media or [])
+                except Exception:
+                    # Session mirroring should not block delivery success.
+                    pass
             media_info = f" with {len(media)} attachments" if media else ""
             return f"Message sent to {channel}:{chat_id}{media_info}"
         except Exception as e:
