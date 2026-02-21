@@ -572,6 +572,26 @@ Simply send the command above to your nanobot (via CLI or any chat channel), and
 
 Config file: `~/.nanobot/config.json`
 
+### Heartbeat model override
+
+You can optionally use a dedicated model for heartbeat ticks:
+
+```json
+{
+  "heartbeat": {
+    "intervalS": 1800,
+    "model": "",
+    "contextSessionKey": ""
+  }
+}
+```
+
+- `heartbeat.model` is optional.
+- When `heartbeat.model` is empty or not set, heartbeat falls back to `agents.defaults.model`.
+- When set, heartbeat requests use the dedicated heartbeat model, while normal chat/cron requests still use `agents.defaults.model`.
+
+A complete default config sample is available at `examples/config.default.json`.
+
 ### Providers
 
 > [!TIP]

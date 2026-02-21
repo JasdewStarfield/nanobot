@@ -235,6 +235,7 @@ class HeartbeatConfig(BaseModel):
     """Heartbeat service configuration."""
 
     interval_s: int = 30 * 60  # 30 minutes by default
+    model: str = ""  # Optional: use a dedicated model for heartbeat (empty = fallback to agents.defaults.model)
     context_session_key: str = ""  # Optional: borrow history from this session when running heartbeat
 
 
