@@ -279,13 +279,13 @@ This file stores important information that should persist across sessions.
     skills_dir.mkdir(exist_ok=True)
 
 
-def _make_provider(config: Config):
+def _make_provider(config: Config, model: str | None = None):
     """Create the appropriate LLM provider from config."""
     from nanobot.providers.litellm_provider import LiteLLMProvider
     from nanobot.providers.openai_codex_provider import OpenAICodexProvider
     from nanobot.providers.custom_provider import CustomProvider
 
-    model = config.agents.defaults.model
+    model = model or config.agents.defaults.model
     provider_name = config.get_provider_name(model)
     p = config.get_provider(model)
 
@@ -347,6 +347,8 @@ def gateway(
     bus = MessageBus()
     provider = _make_provider(config)
     session_manager = SessionManager(config.workspace_path)
+    heartbeat_model = config.heartbeat.model.strip() or config.agents.defaults.model
+    heartbeat_provider = provider if heartbeat_model == config.agents.defaults.model else _make_provider(config, model=heartbeat_model)
     
     # Create cron service first (callback set after agent creation)
     cron_store_path = get_data_dir() / "cron" / "jobs.json"
@@ -358,6 +360,23 @@ def gateway(
         provider=provider,
         workspace=config.workspace_path,
         model=config.agents.defaults.model,
+        temperature=config.agents.defaults.temperature,
+        max_tokens=config.agents.defaults.max_tokens,
+        max_iterations=config.agents.defaults.max_tool_iterations,
+        memory_window=config.agents.defaults.memory_window,
+        brave_api_key=config.tools.web.search.api_key or None,
+        exec_config=config.tools.exec,
+        cron_service=cron,
+        restrict_to_workspace=config.tools.restrict_to_workspace,
+        session_manager=session_manager,
+        mcp_servers=config.tools.mcp_servers,
+    )
+
+    heartbeat_agent = agent if heartbeat_model == config.agents.defaults.model else AgentLoop(
+        bus=bus,
+        provider=heartbeat_provider,
+        workspace=config.workspace_path,
+        model=heartbeat_model,
         temperature=config.agents.defaults.temperature,
         max_tokens=config.agents.defaults.max_tokens,
         max_iterations=config.agents.defaults.max_tool_iterations,
@@ -393,7 +412,7 @@ def gateway(
     async def on_heartbeat(prompt: str) -> str:
         """Execute heartbeat through the agent."""
         context_session_key = config.heartbeat.context_session_key or None
-        return await agent.process_direct(
+        return await heartbeat_agent.process_direct(
             prompt,
             session_key="heartbeat",
             context_session_key=context_session_key,
@@ -431,10 +450,14 @@ def gateway(
         except KeyboardInterrupt:
             console.print("\nShutting down...")
         finally:
-            await agent.close_mcp()
+            await heartbeat_agent.close_mcp()
+            if heartbeat_agent is not agent:
+                await agent.close_mcp()
             heartbeat.stop()
             cron.stop()
-            agent.stop()
+            heartbeat_agent.stop()
+            if heartbeat_agent is not agent:
+                agent.stop()
             await channels.stop_all()
     
     asyncio.run(run())
