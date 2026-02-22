@@ -1,7 +1,7 @@
 """Configuration schema using Pydantic."""
 
 from pathlib import Path
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import AliasChoices, BaseModel, Field, ConfigDict
 from pydantic.alias_generators import to_camel
 from pydantic_settings import BaseSettings
 
@@ -240,7 +240,10 @@ class HeartbeatConfig(BaseModel):
 
     interval_s: int = 30 * 60  # 30 minutes by default
     model: str = ""  # Optional: use a dedicated model for heartbeat (empty = fallback to agents.defaults.model)
-    context_session_key: str = ""  # Optional: borrow history from this session when running heartbeat
+    context_session_key: str = Field(
+        default="",
+        validation_alias=AliasChoices("context_session_key", "contextSessionKey"),
+    )  # Optional: borrow history from this session when running heartbeat
 
 
 class WebSearchConfig(Base):
