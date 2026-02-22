@@ -48,6 +48,8 @@ class AgentLoop:
         temperature: float = 0.7,
         max_tokens: int = 4096,
         memory_window: int = 50,
+        memory_consolidation_interval: int = 5,
+        memory_auto_update_long_term: bool = False,
         brave_api_key: str | None = None,
         exec_config: "ExecToolConfig | None" = None,
         cron_service: "CronService | None" = None,
@@ -65,6 +67,8 @@ class AgentLoop:
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.memory_window = memory_window
+        self.memory_consolidation_interval = max(1, memory_consolidation_interval)
+        self.memory_auto_update_long_term = memory_auto_update_long_term
         self.brave_api_key = brave_api_key
         self.exec_config = exec_config or ExecToolConfig()
         self.cron_service = cron_service
@@ -89,6 +93,7 @@ class AgentLoop:
         self._mcp_servers = mcp_servers or {}
         self._mcp_stack: AsyncExitStack | None = None
         self._mcp_connected = False
+        self._consolidating_sessions: set[str] = set()
         self._register_default_tools()
     
     def _register_default_tools(self) -> None:
@@ -364,7 +369,7 @@ class AgentLoop:
                                   content="🐈 nanobot commands:\n/new — Start a new conversation\n/help — Show available commands")
         
         if session.count_context_messages() > self.memory_window:
-            asyncio.create_task(self._consolidate_memory(session))
+            self._schedule_memory_consolidation(session)
 
         self._set_tool_context(msg.channel, msg.chat_id)
         initial_messages = self.context.build_messages(
@@ -416,6 +421,29 @@ class AgentLoop:
             metadata=msg.metadata or {},  # Pass through for channel-specific needs (e.g. Slack thread_ts)
         )
     
+
+    def _schedule_memory_consolidation(self, session: Session) -> None:
+        """Schedule consolidation if interval and in-flight rules allow it."""
+        if session.key in self._consolidating_sessions:
+            return
+
+        context_count = session.count_context_messages()
+        last_trigger_count = int(session.metadata.get("last_consolidation_trigger_context_count", 0) or 0)
+        if context_count - last_trigger_count < self.memory_consolidation_interval:
+            return
+
+        session.metadata["last_consolidation_trigger_context_count"] = context_count
+        self.sessions.save(session)
+        self._consolidating_sessions.add(session.key)
+
+        async def _run() -> None:
+            try:
+                await self._consolidate_memory(session)
+            finally:
+                self._consolidating_sessions.discard(session.key)
+
+        asyncio.create_task(_run())
+
     async def _process_system_message(self, msg: InboundMessage) -> OutboundMessage | None:
         """
         Process a system message (e.g., subagent announce).
@@ -538,14 +566,16 @@ Respond with ONLY valid JSON, no markdown fences."""
 
             if entry := result.get("history_entry"):
                 memory.append_history(entry)
-            if update := result.get("memory_update"):
-                if update != current_memory:
-                    memory.write_long_term(update)
+            if self.memory_auto_update_long_term:
+                if update := result.get("memory_update"):
+                    if update != current_memory:
+                        memory.write_long_term(update)
 
             if archive_all:
                 session.last_consolidated = 0
             else:
                 session.last_consolidated = len(session.messages) - keep_count
+            self.sessions.save(session)
             logger.info(f"Memory consolidation done: {len(session.messages)} messages, last_consolidated={session.last_consolidated}")
         except Exception as e:
             logger.error(f"Memory consolidation failed: {e}")
