@@ -6,6 +6,8 @@
       "maxTokens": 8192,
       "maxToolIterations": 20,
       "memoryWindow": 50,
+      "memoryConsolidationInterval": 5,
+      "memoryAutoUpdateLongTerm": false,
       "workspace": "~/.nanobot/workspace"
     }
   },

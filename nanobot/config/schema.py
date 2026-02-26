@@ -187,6 +187,8 @@ class AgentDefaults(Base):
     temperature: float = 0.7
     max_tool_iterations: int = 20
     memory_window: int = 50
+    memory_consolidation_interval: int = 5
+    memory_auto_update_long_term: bool = False
 
 
 class AgentsConfig(Base):

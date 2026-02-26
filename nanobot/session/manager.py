@@ -55,6 +55,20 @@ class Session:
         """Count user/final-assistant messages used for history windowing."""
         return sum(1 for m in self.messages if self._is_context_anchor(m))
 
+
+    def get_keep_tail_start_index(self, keep_context_messages: int) -> int:
+        """Return the index where the last N context messages begin (including related tool messages)."""
+        if keep_context_messages <= 0:
+            return len(self.messages)
+
+        anchors_seen = 0
+        for idx in range(len(self.messages) - 1, -1, -1):
+            if self._is_context_anchor(self.messages[idx]):
+                anchors_seen += 1
+                if anchors_seen >= keep_context_messages:
+                    return idx
+        return 0
+
     def get_history(self, max_messages: int = 500) -> list[dict[str, Any]]:
         """Get recent messages in LLM format, preserving message metadata."""
         if max_messages <= 0:
