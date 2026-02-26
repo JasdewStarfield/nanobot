@@ -507,20 +507,31 @@ class AgentLoop:
             keep_count = 0
             logger.info(f"Memory consolidation (archive_all): {len(session.messages)} total messages archived")
         else:
-            keep_count = self.memory_window // 2
-            if len(session.messages) <= keep_count:
-                logger.debug(f"Session {session.key}: No consolidation needed (messages={len(session.messages)}, keep={keep_count})")
+            keep_count = max(1, self.memory_window // 2)
+            context_count = session.count_context_messages()
+            if context_count <= keep_count:
+                logger.debug(
+                    f"Session {session.key}: No consolidation needed (context_messages={context_count}, keep={keep_count})"
+                )
                 return
 
-            messages_to_process = len(session.messages) - session.last_consolidated
+            keep_tail_start = session.get_keep_tail_start_index(keep_count)
+            start_index = max(0, min(session.last_consolidated, keep_tail_start))
+            messages_to_process = keep_tail_start - start_index
             if messages_to_process <= 0:
-                logger.debug(f"Session {session.key}: No new messages to consolidate (last_consolidated={session.last_consolidated}, total={len(session.messages)})")
+                logger.debug(
+                    f"Session {session.key}: No new messages to consolidate "
+                    f"(last_consolidated={session.last_consolidated}, keep_tail_start={keep_tail_start})"
+                )
                 return
 
-            old_messages = session.messages[session.last_consolidated:-keep_count]
+            old_messages = session.messages[start_index:keep_tail_start]
             if not old_messages:
                 return
-            logger.info(f"Memory consolidation started: {len(session.messages)} total, {len(old_messages)} new to consolidate, {keep_count} keep")
+            logger.info(
+                f"Memory consolidation started: {len(session.messages)} total, {len(old_messages)} new to consolidate, "
+                f"{keep_count} context keep"
+            )
 
         lines = []
         for m in old_messages:
@@ -574,7 +585,7 @@ Respond with ONLY valid JSON, no markdown fences."""
             if archive_all:
                 session.last_consolidated = 0
             else:
-                session.last_consolidated = len(session.messages) - keep_count
+                session.last_consolidated = keep_tail_start
             self.sessions.save(session)
             logger.info(f"Memory consolidation done: {len(session.messages)} messages, last_consolidated={session.last_consolidated}")
         except Exception as e:
