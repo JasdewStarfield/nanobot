@@ -166,6 +166,36 @@ class TestSessionPersistence:
         assert history[0]["content"] == "msg20"
         assert history[-1]["content"] == "msg29"
 
+
+    def test_save_preserves_unicode_content(self, temp_manager):
+        """Test that saved session JSONL keeps readable unicode characters."""
+        session = Session(key="test:unicode")
+        session.add_message("user", "天气☀️很好，中文正常")
+
+        temp_manager.save(session)
+
+        session_file = Path(temp_manager.sessions_dir) / "test_unicode.jsonl"
+        raw = session_file.read_text(encoding="utf-8")
+        assert "天气☀️很好，中文正常" in raw
+        assert "\\u" not in raw
+
+
+    def test_load_auto_normalizes_legacy_unicode_escapes(self, temp_manager):
+        """Test that loading legacy escaped JSONL rewrites it to readable unicode."""
+        session_file = Path(temp_manager.sessions_dir) / "test_legacy_unicode.jsonl"
+        session_file.write_text(
+            '{"_type":"metadata","created_at":"2026-01-01T00:00:00","updated_at":"2026-01-01T00:00:00","metadata":{},"last_consolidated":0}\n'
+            '{"role":"user","content":"\\u5929\\u6c14\\u5f88\\u597d"}\n',
+            encoding="utf-8",
+        )
+
+        session = temp_manager.get_or_create("test:legacy_unicode")
+        assert session.messages[0]["content"] == "天气很好"
+
+        raw = session_file.read_text(encoding="utf-8")
+        assert "天气很好" in raw
+        assert "\\u5929" not in raw
+
     def test_clear_resets_session(self, temp_manager):
         """Test that clear() properly resets session."""
         session = create_session_with_messages("test:clear", 10)

@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import re
 import time
 import uuid
 from datetime import datetime
@@ -66,7 +67,9 @@ class CronService:
         
         if self.store_path.exists():
             try:
-                data = json.loads(self.store_path.read_text())
+                raw = self.store_path.read_text(encoding="utf-8")
+                needs_normalize_save = bool(re.search(r"\\u[0-9a-fA-F]{4}", raw))
+                data = json.loads(raw)
                 jobs = []
                 for j in data.get("jobs", []):
                     jobs.append(CronJob(
@@ -98,6 +101,8 @@ class CronService:
                         delete_after_run=j.get("deleteAfterRun", False),
                     ))
                 self._store = CronStore(jobs=jobs)
+                if needs_normalize_save:
+                    self._save_store()
             except Exception as e:
                 logger.warning(f"Failed to load cron store: {e}")
                 self._store = CronStore()
@@ -148,7 +153,10 @@ class CronService:
             ]
         }
         
-        self.store_path.write_text(json.dumps(data, indent=2))
+        self.store_path.write_text(
+            json.dumps(data, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
     
     async def start(self) -> None:
         """Start the cron service."""
