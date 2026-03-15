@@ -141,6 +141,22 @@ def _print_agent_response(response: str, render_markdown: bool) -> None:
     console.print()
 
 
+def _append_assistant_message_to_session(
+    session_manager: Any,
+    *,
+    channel: str | None,
+    chat_id: str | None,
+    content: str,
+) -> None:
+    """Append a delivered assistant message to the target user session history."""
+    if not channel or not chat_id or not content:
+        return
+
+    session = session_manager.get_or_create(f"{channel}:{chat_id}")
+    session.add_message("assistant", content)
+    session_manager.save(session)
+
+
 async def _print_interactive_line(text: str) -> None:
     """Print async interactive updates with prompt_toolkit-safe Rich styling."""
     def _write() -> None:
@@ -473,6 +489,12 @@ def gateway(
 
         message_tool = agent.tools.get("message")
         if isinstance(message_tool, MessageTool) and message_tool._sent_in_turn:
+            _append_assistant_message_to_session(
+                session_manager,
+                channel=job.payload.channel or "cli",
+                chat_id=job.payload.to or "direct",
+                content=response,
+            )
             return response
 
         if job.payload.deliver and job.payload.to and response:
@@ -486,6 +508,12 @@ def gateway(
                     chat_id=job.payload.to,
                     content=response,
                 ))
+                _append_assistant_message_to_session(
+                    session_manager,
+                    channel=job.payload.channel or "cli",
+                    chat_id=job.payload.to or "direct",
+                    content=response,
+                )
         return response
     cron.on_job = on_cron_job
 
