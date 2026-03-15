@@ -159,3 +159,47 @@ async def test_openrouter_native_model_id_gets_double_prefixed() -> None:
         "openrouter/free must become openrouter/openrouter/free — "
         "LiteLLM strips one layer so the API receives openrouter/free"
     )
+
+
+@pytest.mark.asyncio
+async def test_copilot_initiator_header_user_turn() -> None:
+    """Copilot requests should tag user-originated turns as user initiator."""
+    mock_acompletion = AsyncMock(return_value=_fake_response())
+
+    with patch("nanobot.providers.litellm_provider.acompletion", mock_acompletion):
+        provider = LiteLLMProvider(default_model="github_copilot/gpt-4o")
+        await provider.chat(
+            messages=[
+                {"role": "system", "content": "You are helpful."},
+                {"role": "user", "content": "hello"},
+            ],
+            model="github_copilot/gpt-4o",
+        )
+
+    call_kwargs = mock_acompletion.call_args.kwargs
+    assert call_kwargs["extra_headers"]["X-Initiator"] == "user"
+
+
+@pytest.mark.asyncio
+async def test_copilot_initiator_header_agent_turn_and_parallel_tools() -> None:
+    """Copilot continuation turns should tag agent initiator and enable parallel_tool_calls."""
+    mock_acompletion = AsyncMock(return_value=_fake_response())
+
+    with patch("nanobot.providers.litellm_provider.acompletion", mock_acompletion):
+        provider = LiteLLMProvider(default_model="github_copilot/gpt-4o")
+        await provider.chat(
+            messages=[
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": "I'll call tools."},
+                {"role": "tool", "tool_call_id": "call_1", "name": "list_dir", "content": "ok"},
+            ],
+            tools=[{
+                "type": "function",
+                "function": {"name": "list_dir", "description": "List files", "parameters": {"type": "object", "properties": {}}},
+            }],
+            model="github_copilot/gpt-4o",
+        )
+
+    call_kwargs = mock_acompletion.call_args.kwargs
+    assert call_kwargs["extra_headers"]["X-Initiator"] == "agent"
+    assert call_kwargs["parallel_tool_calls"] is True
