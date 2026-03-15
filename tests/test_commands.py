@@ -9,6 +9,7 @@ from typer.testing import CliRunner
 from nanobot.cli.commands import (
     _append_assistant_message_to_session,
     _build_recent_session_context,
+    _clear_session_history,
     app,
 )
 from nanobot.config.schema import Config
@@ -85,6 +86,25 @@ def test_build_recent_session_context_skips_missing_target() -> None:
     assert _build_recent_session_context(session_manager, channel=None, chat_id="1") == ""
     assert _build_recent_session_context(session_manager, channel="telegram", chat_id=None) == ""
     session_manager.get_or_create.assert_not_called()
+
+
+def test_clear_session_history_resets_and_saves_session() -> None:
+    session = MagicMock()
+    session_manager = MagicMock()
+    session_manager.get_or_create.return_value = session
+
+    _clear_session_history(session_manager, "heartbeat")
+
+    session_manager.get_or_create.assert_called_once_with("heartbeat")
+    session.clear.assert_called_once_with()
+    session_manager.save.assert_called_once_with(session)
+
+
+def test_config_exposes_session_reset_toggles() -> None:
+    config = Config()
+
+    assert config.gateway.reset_repeating_cron_session_history_each_run is False
+    assert config.gateway.heartbeat.reset_session_history_each_run is False
 
 
 class _StopGateway(RuntimeError):

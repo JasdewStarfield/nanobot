@@ -203,6 +203,13 @@ def _build_recent_session_context(
     return "\n".join(reversed(lines))
 
 
+def _clear_session_history(session_manager: Any, session_key: str) -> None:
+    """Clear persisted messages for a session key."""
+    session = session_manager.get_or_create(session_key)
+    session.clear()
+    session_manager.save(session)
+
+
 def _append_assistant_message_to_session(
     session_manager: Any,
     *,
@@ -548,10 +555,18 @@ def gateway(
         cron_token = None
         if isinstance(cron_tool, CronTool):
             cron_token = cron_tool.set_cron_context(True)
+
+        cron_session_key = f"cron:{job.id}"
+        if (
+            config.gateway.reset_repeating_cron_session_history_each_run
+            and job.schedule.kind in {"every", "cron"}
+        ):
+            _clear_session_history(session_manager, cron_session_key)
+
         try:
             response = await agent.process_direct(
                 reminder_note,
-                session_key=f"cron:{job.id}",
+                session_key=cron_session_key,
                 channel=job.payload.channel or "cli",
                 chat_id=job.payload.to or "direct",
             )
@@ -629,9 +644,13 @@ def gateway(
                 f"{recent_context}"
             )
 
+        heartbeat_session_key = "heartbeat"
+        if hb_cfg.reset_session_history_each_run:
+            _clear_session_history(session_manager, heartbeat_session_key)
+
         return await agent.process_direct(
             heartbeat_prompt,
-            session_key="heartbeat",
+            session_key=heartbeat_session_key,
             channel=channel,
             chat_id=chat_id,
             on_progress=_silent,
