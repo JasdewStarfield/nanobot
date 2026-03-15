@@ -177,7 +177,9 @@ async def test_copilot_initiator_header_user_turn() -> None:
         )
 
     call_kwargs = mock_acompletion.call_args.kwargs
-    assert call_kwargs["extra_headers"]["X-Initiator"] == "user"
+    assert call_kwargs["extra_headers"]["x-initiator"] == "user"
+    assert call_kwargs["extra_headers"]["user-agent"] == "GitHubCopilotChat/0.26.7"
+    assert call_kwargs["extra_headers"]["x-github-api-version"] == "2025-04-01"
 
 
 @pytest.mark.asyncio
@@ -201,5 +203,25 @@ async def test_copilot_initiator_header_agent_turn_and_parallel_tools() -> None:
         )
 
     call_kwargs = mock_acompletion.call_args.kwargs
-    assert call_kwargs["extra_headers"]["X-Initiator"] == "agent"
+    assert call_kwargs["extra_headers"]["x-initiator"] == "agent"
     assert call_kwargs["parallel_tool_calls"] is True
+
+
+@pytest.mark.asyncio
+async def test_copilot_default_headers_allow_user_override() -> None:
+    """User-provided extra headers should override Copilot defaults."""
+    mock_acompletion = AsyncMock(return_value=_fake_response())
+
+    with patch("nanobot.providers.litellm_provider.acompletion", mock_acompletion):
+        provider = LiteLLMProvider(
+            default_model="github_copilot/gpt-4o",
+            extra_headers={"User-Agent": "CustomUA/1.0", "OPENAI-INTENT": "custom-intent"},
+        )
+        await provider.chat(
+            messages=[{"role": "user", "content": "hello"}],
+            model="github_copilot/gpt-4o",
+        )
+
+    call_kwargs = mock_acompletion.call_args.kwargs
+    assert call_kwargs["extra_headers"]["user-agent"] == "CustomUA/1.0"
+    assert call_kwargs["extra_headers"]["openai-intent"] == "custom-intent"

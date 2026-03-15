@@ -18,6 +18,17 @@ from nanobot.providers.registry import find_by_model, find_gateway
 _ALLOWED_MSG_KEYS = frozenset({"role", "content", "tool_calls", "tool_call_id", "name", "reasoning_content"})
 _ANTHROPIC_EXTRA_KEYS = frozenset({"thinking_blocks"})
 _ALNUM = string.ascii_letters + string.digits
+COPILOT_DEFAULT_HEADERS: dict[str, str] = {
+    # Keep keys/values close to known-good Copilot chat headers.
+    # Header names are case-insensitive, but we normalize to lowercase to
+    # avoid duplicate-key collisions when users provide lowercase keys.
+    "user-agent": "GitHubCopilotChat/0.26.7",
+    "editor-version": "vscode/1.95.0",
+    "editor-plugin-version": "copilot-chat/0.26.7",
+    "copilot-integration-id": "vscode-chat",
+    "openai-intent": "conversation-panel",
+    "x-github-api-version": "2025-04-01",
+}
 
 def _short_tool_id() -> str:
     """Generate a 9-char alphanumeric ID compatible with all providers (incl. Mistral)."""
@@ -126,18 +137,28 @@ class LiteLLMProvider(LLMProvider):
                 return role
         return None
 
+    @staticmethod
+    def _normalize_headers(headers: dict[str, str] | None) -> dict[str, str]:
+        """Normalize headers to lowercase keys to prevent duplicate collisions."""
+        if not headers:
+            return {}
+        return {str(k).lower(): str(v) for k, v in headers.items()}
+
     def _build_extra_headers(self, model: str, messages: list[dict[str, Any]]) -> dict[str, str] | None:
         """Build dynamic request headers for provider-specific behavior."""
-        headers = dict(self.extra_headers)
+        headers = self._normalize_headers(self.extra_headers)
 
         # OpenClaw-style Copilot initiator tagging:
-        # - user turn => X-Initiator: user
-        # - tool/assistant continuation => X-Initiator: agent
+        # - user turn => x-initiator: user
+        # - tool/assistant continuation => x-initiator: agent
         # This keeps multi-round tool loops under a single user-turn semantic
         # on providers that support this hint.
         if model.startswith("github_copilot/"):
+            merged = dict(COPILOT_DEFAULT_HEADERS)
+            merged.update(headers)
             role = self._last_message_role(messages)
-            headers["X-Initiator"] = "user" if role == "user" else "agent"
+            merged["x-initiator"] = "user" if role == "user" else "agent"
+            return merged
 
         return headers or None
 
