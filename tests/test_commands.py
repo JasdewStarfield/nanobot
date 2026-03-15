@@ -6,7 +6,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from typer.testing import CliRunner
 
-from nanobot.cli.commands import app
+from nanobot.cli.commands import (
+    _append_assistant_message_to_session,
+    _build_recent_session_context,
+    app,
+)
 from nanobot.config.schema import Config
 from nanobot.providers.litellm_provider import LiteLLMProvider
 from nanobot.providers.openai_codex_provider import _strip_model_prefix
@@ -19,6 +23,68 @@ def _strip_ansi(text):
     return ansi_escape.sub('', text)
 
 runner = CliRunner()
+
+
+def test_append_assistant_message_to_session_writes_target_session() -> None:
+    session = MagicMock()
+    session_manager = MagicMock()
+    session_manager.get_or_create.return_value = session
+
+    _append_assistant_message_to_session(
+        session_manager,
+        channel="telegram",
+        chat_id="12345",
+        content="daily summary",
+    )
+
+    session_manager.get_or_create.assert_called_once_with("telegram:12345")
+    session.add_message.assert_called_once_with("assistant", "daily summary")
+    session_manager.save.assert_called_once_with(session)
+
+
+def test_append_assistant_message_to_session_skips_empty_target_or_content() -> None:
+    session_manager = MagicMock()
+
+    _append_assistant_message_to_session(session_manager, channel=None, chat_id="123", content="ok")
+    _append_assistant_message_to_session(session_manager, channel="telegram", chat_id=None, content="ok")
+    _append_assistant_message_to_session(session_manager, channel="telegram", chat_id="123", content="")
+
+    session_manager.get_or_create.assert_not_called()
+    session_manager.save.assert_not_called()
+
+
+def test_build_recent_session_context_returns_bounded_recent_lines() -> None:
+    session = MagicMock()
+    session.messages = [
+        {"role": "user", "content": "hello", "timestamp": "2026-03-15T09:00:00"},
+        {"role": "tool", "content": "raw tool output", "timestamp": "2026-03-15T09:00:10"},
+        {"role": "assistant", "content": "world", "timestamp": "2026-03-15T09:00:20"},
+        {"role": "user", "content": "x" * 1200, "timestamp": "2026-03-15T09:00:30"},
+    ]
+    session_manager = MagicMock()
+    session_manager.get_or_create.return_value = session
+
+    context = _build_recent_session_context(
+        session_manager,
+        channel="telegram",
+        chat_id="12345",
+        max_messages=4,
+        max_chars=700,
+    )
+
+    assert "[2026-03-15T09:00:00] user: hello" in context
+    assert "[2026-03-15T09:00:20] assistant: world" in context
+    assert "tool:" not in context
+    assert "[2026-03-15T09:00:30] user:" in context
+    assert len(context) <= 700
+
+
+def test_build_recent_session_context_skips_missing_target() -> None:
+    session_manager = MagicMock()
+
+    assert _build_recent_session_context(session_manager, channel=None, chat_id="1") == ""
+    assert _build_recent_session_context(session_manager, channel="telegram", chat_id=None) == ""
+    session_manager.get_or_create.assert_not_called()
 
 
 class _StopGateway(RuntimeError):
