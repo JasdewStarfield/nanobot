@@ -141,6 +141,91 @@ def _print_agent_response(response: str, render_markdown: bool) -> None:
     console.print()
 
 
+def _stringify_session_content(content: Any) -> str:
+    """Normalize stored session content into compact text for prompt context."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "text" and isinstance(item.get("text"), str):
+                parts.append(item["text"])
+            elif item.get("type") == "image_url":
+                parts.append("[image]")
+        return "\n".join(p for p in parts if p).strip()
+    return str(content)
+
+
+def _build_recent_session_context(
+    session_manager: Any,
+    *,
+    channel: str | None,
+    chat_id: str | None,
+    max_messages: int = 12,
+    max_chars: int = 3500,
+) -> str:
+    """Build a bounded, text-only recent-history snippet for cron/heartbeat prompts."""
+    if not channel or not chat_id:
+        return ""
+
+    session = session_manager.get_or_create(f"{channel}:{chat_id}")
+    recent = session.messages[-max_messages:]
+    if not recent:
+        return ""
+
+    lines: list[str] = []
+    total = 0
+    for message in reversed(recent):
+        role = message.get("role", "unknown")
+        if role == "tool":
+            continue
+
+        content = _stringify_session_content(message.get("content", "")).strip()
+        if not content:
+            continue
+
+        if len(content) > 400:
+            content = content[:400] + "..."
+
+        timestamp = str(message.get("timestamp", "")).strip()
+        prefix = f"[{timestamp}] " if timestamp else ""
+        line = f"{prefix}{role}: {content}"
+        line_len = len(line) + 1
+        if total + line_len > max_chars:
+            break
+        lines.append(line)
+        total += line_len
+
+    if not lines:
+        return ""
+    return "\n".join(reversed(lines))
+
+
+def _clear_session_history(session_manager: Any, session_key: str) -> None:
+    """Clear persisted messages for a session key."""
+    session = session_manager.get_or_create(session_key)
+    session.clear()
+    session_manager.save(session)
+
+
+def _append_assistant_message_to_session(
+    session_manager: Any,
+    *,
+    channel: str | None,
+    chat_id: str | None,
+    content: str,
+) -> None:
+    """Append a delivered assistant message to the target user session history."""
+    if not channel or not chat_id or not content:
+        return
+
+    session = session_manager.get_or_create(f"{channel}:{chat_id}")
+    session.add_message("assistant", content)
+    session_manager.save(session)
+
+
 async def _print_interactive_line(text: str) -> None:
     """Print async interactive updates with prompt_toolkit-safe Rich styling."""
     def _write() -> None:
@@ -450,20 +535,38 @@ def gateway(
         from nanobot.agent.tools.message import MessageTool
         from nanobot.utils.evaluator import evaluate_response
 
+        recent_context = _build_recent_session_context(
+            session_manager,
+            channel=job.payload.channel or "cli",
+            chat_id=job.payload.to or "direct",
+        )
         reminder_note = (
             "[Scheduled Task] Timer finished.\n\n"
             f"Task '{job.name}' has been triggered.\n"
             f"Scheduled instruction: {job.payload.message}"
         )
+        if recent_context:
+            reminder_note += (
+                "\n\nRecent conversation context (most recent first, truncated):\n"
+                f"{recent_context}"
+            )
 
         cron_tool = agent.tools.get("cron")
         cron_token = None
         if isinstance(cron_tool, CronTool):
             cron_token = cron_tool.set_cron_context(True)
+
+        cron_session_key = f"cron:{job.id}"
+        if (
+            config.gateway.reset_repeating_cron_session_history_each_run
+            and job.schedule.kind in {"every", "cron"}
+        ):
+            _clear_session_history(session_manager, cron_session_key)
+
         try:
             response = await agent.process_direct(
                 reminder_note,
-                session_key=f"cron:{job.id}",
+                session_key=cron_session_key,
                 channel=job.payload.channel or "cli",
                 chat_id=job.payload.to or "direct",
             )
@@ -473,6 +576,12 @@ def gateway(
 
         message_tool = agent.tools.get("message")
         if isinstance(message_tool, MessageTool) and message_tool._sent_in_turn:
+            _append_assistant_message_to_session(
+                session_manager,
+                channel=job.payload.channel or "cli",
+                chat_id=job.payload.to or "direct",
+                content=response,
+            )
             return response
 
         if job.payload.deliver and job.payload.to and response:
@@ -486,6 +595,12 @@ def gateway(
                     chat_id=job.payload.to,
                     content=response,
                 ))
+                _append_assistant_message_to_session(
+                    session_manager,
+                    channel=job.payload.channel or "cli",
+                    chat_id=job.payload.to or "direct",
+                    content=response,
+                )
         return response
     cron.on_job = on_cron_job
 
@@ -516,9 +631,26 @@ def gateway(
         async def _silent(*_args, **_kwargs):
             pass
 
+        recent_context = _build_recent_session_context(
+            session_manager,
+            channel=channel,
+            chat_id=chat_id,
+        )
+        heartbeat_prompt = tasks
+        if recent_context:
+            heartbeat_prompt = (
+                f"{tasks}\n\n"
+                "Recent conversation context (most recent first, truncated):\n"
+                f"{recent_context}"
+            )
+
+        heartbeat_session_key = "heartbeat"
+        if hb_cfg.reset_session_history_each_run:
+            _clear_session_history(session_manager, heartbeat_session_key)
+
         return await agent.process_direct(
-            tasks,
-            session_key="heartbeat",
+            heartbeat_prompt,
+            session_key=heartbeat_session_key,
             channel=channel,
             chat_id=chat_id,
             on_progress=_silent,
