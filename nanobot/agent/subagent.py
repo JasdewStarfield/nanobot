@@ -137,11 +137,20 @@ class SubagentManager:
                         thinking_blocks=response.thinking_blocks,
                     ))
 
-                    # Execute tools
                     for tool_call in response.tool_calls:
                         args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                         logger.debug("Subagent [{}] executing: {} with arguments: {}", task_id, tool_call.name, args_str)
-                        result = await tools.execute(tool_call.name, tool_call.arguments)
+
+                    # Execute tools concurrently to reduce extra LLM turns
+                    # when the model emits multiple independent calls.
+                    tool_results = await asyncio.gather(
+                        *[
+                            tools.execute(tool_call.name, tool_call.arguments)
+                            for tool_call in response.tool_calls
+                        ]
+                    )
+
+                    for tool_call, result in zip(response.tool_calls, tool_results, strict=False):
                         messages.append({
                             "role": "tool",
                             "tool_call_id": tool_call.id,
