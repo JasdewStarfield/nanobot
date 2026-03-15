@@ -18,6 +18,17 @@ from nanobot.providers.registry import find_by_model, find_gateway
 _ALLOWED_MSG_KEYS = frozenset({"role", "content", "tool_calls", "tool_call_id", "name", "reasoning_content"})
 _ANTHROPIC_EXTRA_KEYS = frozenset({"thinking_blocks"})
 _ALNUM = string.ascii_letters + string.digits
+COPILOT_DEFAULT_HEADERS: dict[str, str] = {
+    # Keep keys/values close to known-good Copilot chat headers.
+    # Header names are case-insensitive, but we normalize to lowercase to
+    # avoid duplicate-key collisions when users provide lowercase keys.
+    "user-agent": "GitHubCopilotChat/0.26.7",
+    "editor-version": "vscode/1.95.0",
+    "editor-plugin-version": "copilot-chat/0.26.7",
+    "copilot-integration-id": "vscode-chat",
+    "openai-intent": "conversation-panel",
+    "x-github-api-version": "2025-04-01",
+}
 
 def _short_tool_id() -> str:
     """Generate a 9-char alphanumeric ID compatible with all providers (incl. Mistral)."""
@@ -116,6 +127,40 @@ class LiteLLMProvider(LLMProvider):
         if prefix.lower().replace("-", "_") != spec_name:
             return model
         return f"{canonical_prefix}/{remainder}"
+
+    @staticmethod
+    def _last_message_role(messages: list[dict[str, Any]]) -> str | None:
+        """Return the role of the last non-system message."""
+        for msg in reversed(messages):
+            role = msg.get("role")
+            if role and role != "system":
+                return role
+        return None
+
+    @staticmethod
+    def _normalize_headers(headers: dict[str, str] | None) -> dict[str, str]:
+        """Normalize headers to lowercase keys to prevent duplicate collisions."""
+        if not headers:
+            return {}
+        return {str(k).lower(): str(v) for k, v in headers.items()}
+
+    def _build_extra_headers(self, model: str, messages: list[dict[str, Any]]) -> dict[str, str] | None:
+        """Build dynamic request headers for provider-specific behavior."""
+        headers = self._normalize_headers(self.extra_headers)
+
+        # OpenClaw-style Copilot initiator tagging:
+        # - user turn => x-initiator: user
+        # - tool/assistant continuation => x-initiator: agent
+        # This keeps multi-round tool loops under a single user-turn semantic
+        # on providers that support this hint.
+        if model.startswith("github_copilot/"):
+            merged = dict(COPILOT_DEFAULT_HEADERS)
+            merged.update(headers)
+            role = self._last_message_role(messages)
+            merged["x-initiator"] = "user" if role == "user" else "agent"
+            return merged
+
+        return headers or None
 
     def _supports_cache_control(self, model: str) -> bool:
         """Return True when the provider supports cache_control on content blocks."""
@@ -265,9 +310,9 @@ class LiteLLMProvider(LLMProvider):
         if self.api_base:
             kwargs["api_base"] = self.api_base
 
-        # Pass extra headers (e.g. APP-Code for AiHubMix)
-        if self.extra_headers:
-            kwargs["extra_headers"] = self.extra_headers
+        extra_headers = self._build_extra_headers(model, messages)
+        if extra_headers:
+            kwargs["extra_headers"] = extra_headers
         
         if reasoning_effort:
             kwargs["reasoning_effort"] = reasoning_effort
@@ -276,6 +321,9 @@ class LiteLLMProvider(LLMProvider):
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = tool_choice or "auto"
+            # Encourage providers that support parallel function calling to
+            # emit multiple independent tool calls in a single model turn.
+            kwargs["parallel_tool_calls"] = True
 
         try:
             response = await acompletion(**kwargs)
