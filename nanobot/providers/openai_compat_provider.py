@@ -246,6 +246,12 @@ def _is_direct_openai_base(api_base: str | None) -> bool:
     return "api.openai.com" in normalized and "openrouter" not in normalized
 
 
+def _is_github_copilot_responses_model(model_name: str) -> bool:
+    """Return True for Copilot models known to require the Responses API."""
+    name = model_name.lower().split("/")[-1]
+    return "gpt-5" in name or name.startswith(("o1", "o3", "o4"))
+
+
 def _responses_circuit_key(
     model: str | None,
     default_model: str,
@@ -589,6 +595,12 @@ class OpenAICompatProvider(LLMProvider):
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = tool_choice or "auto"
+            if self._supports_parallel_tool_calls():
+                kwargs["parallel_tool_calls"] = True
+
+        extra_headers = self._request_extra_headers(messages)
+        if extra_headers:
+            kwargs["extra_headers"] = extra_headers
 
         # Backfill reasoning_content="" on assistants missing it: DeepSeek
         # thinking mode rejects history otherwise (#3554, #3584); "" reads
@@ -625,6 +637,14 @@ class OpenAICompatProvider(LLMProvider):
 
         return kwargs
 
+    def _request_extra_headers(self, messages: list[dict[str, Any]]) -> dict[str, str] | None:
+        """Return per-request headers for providers that need dynamic metadata."""
+        return None
+
+    def _supports_parallel_tool_calls(self) -> bool:
+        """Whether this provider should request parallel tool calls when tools are present."""
+        return False
+
     def _should_use_responses_api(
         self,
         model: str | None,
@@ -633,16 +653,17 @@ class OpenAICompatProvider(LLMProvider):
         """Use Responses API only for direct OpenAI requests that benefit from it."""
         if self._spec and self._spec.name not in ("openai", "github_copilot"):
             return False
-        if self._spec is None or self._spec.name != "github_copilot":
+        model_name = (model or self.default_model).lower()
+        if self._spec and self._spec.name == "github_copilot":
+            wants = _is_github_copilot_responses_model(model_name)
+        else:
             if not _is_direct_openai_base(self._effective_base):
                 return False
-
-        model_name = (model or self.default_model).lower()
-        wants = False
-        if reasoning_effort and reasoning_effort.lower() != "none":
-            wants = True
-        elif any(token in model_name for token in ("gpt-5", "o1", "o3", "o4")):
-            wants = True
+            wants = False
+            if reasoning_effort and reasoning_effort.lower() != "none":
+                wants = True
+            elif any(token in model_name for token in ("gpt-5", "o1", "o3", "o4")):
+                wants = True
         if not wants:
             return False
 
@@ -737,6 +758,12 @@ class OpenAICompatProvider(LLMProvider):
         if tools:
             body["tools"] = convert_tools(tools)
             body["tool_choice"] = tool_choice or "auto"
+            if self._supports_parallel_tool_calls():
+                body["parallel_tool_calls"] = True
+
+        extra_headers = self._request_extra_headers(messages)
+        if extra_headers:
+            body["extra_headers"] = extra_headers
 
         return body
 

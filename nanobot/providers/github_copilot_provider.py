@@ -25,8 +25,30 @@ TOKEN_APP_NAME = "nanobot"
 USER_AGENT = "nanobot/0.1"
 EDITOR_VERSION = "vscode/1.99.0"
 EDITOR_PLUGIN_VERSION = "copilot-chat/0.26.0"
+COPILOT_CHAT_DEFAULT_HEADERS: dict[str, str] = {
+    "user-agent": "GitHubCopilotChat/0.26.7",
+    "editor-version": EDITOR_VERSION,
+    "editor-plugin-version": "copilot-chat/0.26.7",
+    "copilot-integration-id": "vscode-chat",
+    "openai-intent": "conversation-panel",
+    "x-github-api-version": "2025-04-01",
+}
 _EXPIRY_SKEW_SECONDS = 60
 _LONG_LIVED_TOKEN_SECONDS = 315360000
+
+
+def _normalize_headers(headers: dict[str, str] | None) -> dict[str, str]:
+    if not headers:
+        return {}
+    return {str(k).lower(): str(v) for k, v in headers.items()}
+
+
+def _last_message_role(messages: list[dict[str, object]]) -> str | None:
+    for message in reversed(messages):
+        role = message.get("role")
+        if isinstance(role, str) and role != "system":
+            return role
+    return None
 
 
 def get_storage() -> FileTokenStorage:
@@ -157,22 +179,31 @@ def login_github_copilot(
 class GitHubCopilotProvider(OpenAICompatProvider):
     """Provider that exchanges a stored GitHub OAuth token for Copilot access tokens."""
 
-    def __init__(self, default_model: str = "github-copilot/gpt-4.1"):
+    def __init__(
+        self,
+        default_model: str = "github-copilot/gpt-4.1",
+        extra_headers: dict[str, str] | None = None,
+    ):
         from nanobot.providers.registry import find_by_name
 
         self._copilot_access_token: str | None = None
         self._copilot_expires_at: float = 0.0
+        headers = dict(COPILOT_CHAT_DEFAULT_HEADERS)
+        headers.update(_normalize_headers(extra_headers))
         super().__init__(
             api_key="no-key",
             api_base=DEFAULT_COPILOT_BASE_URL,
             default_model=default_model,
-            extra_headers={
-                "Editor-Version": EDITOR_VERSION,
-                "Editor-Plugin-Version": EDITOR_PLUGIN_VERSION,
-                "User-Agent": USER_AGENT,
-            },
+            extra_headers=headers,
             spec=find_by_name("github_copilot"),
         )
+
+    def _request_extra_headers(self, messages: list[dict[str, object]]) -> dict[str, str] | None:
+        role = _last_message_role(messages)
+        return {"x-initiator": "user" if role == "user" else "agent"}
+
+    def _supports_parallel_tool_calls(self) -> bool:
+        return True
 
     async def _get_copilot_access_token(self) -> str:
         now = time.time()

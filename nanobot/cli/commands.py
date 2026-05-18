@@ -200,6 +200,13 @@ def _response_renderable(content: str, render_markdown: bool, metadata: dict | N
     return Markdown(content)
 
 
+def _clear_session_history(session_manager: Any, session_key: str) -> None:
+    """Clear persisted messages for one internal session."""
+    session = session_manager.get_or_create(session_key)
+    session.clear()
+    session_manager.save(session)
+
+
 async def _print_interactive_line(text: str) -> None:
     """Print async interactive updates with prompt_toolkit-safe Rich styling."""
     def _write() -> None:
@@ -775,6 +782,48 @@ def _run_gateway(
             else f"{channel}:{chat_id}"
         )
 
+    def _cron_target_session_key(job: CronJob) -> str | None:
+        if job.payload.session_key:
+            return job.payload.session_key
+        if job.payload.channel and job.payload.to:
+            return _channel_session_key(job.payload.channel, job.payload.to)
+        return None
+
+    def _cron_context_from_target_session(job: CronJob) -> str:
+        target_session_key = _cron_target_session_key(job)
+        if not target_session_key:
+            return ""
+
+        session = session_manager.get_or_create(target_session_key)
+        if not hasattr(session, "get_history"):
+            return ""
+
+        history = session.get_history(
+            max_messages=12,
+            max_tokens=3500,
+            include_timestamps=True,
+        )
+        if not history:
+            return ""
+
+        lines = [
+            "Relevant recent context from the target conversation. "
+            "Use it only to interpret and deliver this scheduled reminder:"
+        ]
+        for message in history:
+            role = str(message.get("role") or "message")
+            content = message.get("content")
+            if not isinstance(content, str):
+                content = str(content)
+            content = content.strip()
+            if not content:
+                continue
+            if len(content) > 1000:
+                content = f"{content[:1000]}..."
+            lines.append(f"{role}: {content}")
+
+        return "\n".join(lines) if len(lines) > 1 else ""
+
     async def _deliver_to_channel(
         msg: OutboundMessage, *, record: bool = False, session_key: str | None = None,
     ) -> None:
@@ -832,6 +881,9 @@ def _run_gateway(
             "like 'Done' or 'Reminded'.\n\n"
             f"Reminder: {job.payload.message}"
         )
+        target_context = _cron_context_from_target_session(job)
+        if target_context:
+            reminder_note = f"{reminder_note}\n\n{target_context}"
 
         cron_tool = agent.tools.get("cron")
         cron_token = None
@@ -845,10 +897,17 @@ def _run_gateway(
         if isinstance(message_tool, MessageTool):
             message_record_token = message_tool.set_record_channel_delivery(True)
 
+        cron_session_key = f"cron:{job.id}"
+        if (
+            config.gateway.reset_repeating_cron_session_history_each_run
+            and job.schedule.kind in {"every", "cron"}
+        ):
+            _clear_session_history(session_manager, cron_session_key)
+
         try:
             resp = await agent.process_direct(
                 reminder_note,
-                session_key=f"cron:{job.id}",
+                session_key=cron_session_key,
                 channel=job.payload.channel or "cli",
                 chat_id=job.payload.to or "direct",
                 on_progress=_silent,

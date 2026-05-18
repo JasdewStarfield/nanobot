@@ -241,6 +241,7 @@ class GatewayConfig(Base):
 
     host: str = "127.0.0.1"  # Safer default: local-only bind.
     port: int = 18790
+    reset_repeating_cron_session_history_each_run: bool = False
     heartbeat: HeartbeatConfig = Field(default_factory=HeartbeatConfig)
 
 

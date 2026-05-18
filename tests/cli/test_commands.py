@@ -9,11 +9,10 @@ import pytest
 from typer.testing import CliRunner
 
 from nanobot.bus.events import OutboundMessage
-from nanobot.cli.commands import app
-from nanobot.providers.factory import make_provider
+from nanobot.cli.commands import _clear_session_history, app
 from nanobot.config.schema import Config
-from nanobot.cron.types import CronJob, CronPayload
-from nanobot.providers.factory import ProviderSnapshot
+from nanobot.cron.types import CronJob, CronPayload, CronSchedule
+from nanobot.providers.factory import ProviderSnapshot, make_provider
 from nanobot.providers.openai_codex_provider import _strip_model_prefix
 from nanobot.providers.registry import find_by_name
 
@@ -520,8 +519,8 @@ def test_openai_compat_provider_passes_model_through():
 
 
 def test_make_provider_uses_github_copilot_backend():
-    from nanobot.providers.factory import make_provider
     from nanobot.config.schema import Config
+    from nanobot.providers.factory import make_provider
 
     config = Config.model_validate(
         {
@@ -928,6 +927,24 @@ def test_heartbeat_retains_recent_messages_by_default():
     assert config.gateway.heartbeat.keep_recent_messages == 8
 
 
+def test_gateway_exposes_repeating_cron_reset_toggle():
+    config = Config()
+
+    assert config.gateway.reset_repeating_cron_session_history_each_run is False
+
+
+def test_clear_session_history_resets_and_saves_session() -> None:
+    session = MagicMock()
+    session_manager = MagicMock()
+    session_manager.get_or_create.return_value = session
+
+    _clear_session_history(session_manager, "cron:job-1")
+
+    session_manager.get_or_create.assert_called_once_with("cron:job-1")
+    session.clear.assert_called_once_with()
+    session_manager.save.assert_called_once_with(session)
+
+
 def _write_instance_config(tmp_path: Path) -> Path:
     config_file = tmp_path / "instance" / "config.json"
     config_file.parent.mkdir(parents=True)
@@ -1265,6 +1282,230 @@ def test_gateway_cron_evaluator_receives_scheduled_reminder_context(
             "_channel_delivery": True,
         }
     ]
+
+
+def test_gateway_cron_job_includes_target_session_context(
+    monkeypatch, tmp_path: Path
+) -> None:
+    config_file = tmp_path / "instance" / "config.json"
+    config_file.parent.mkdir(parents=True)
+    config_file.write_text("{}")
+
+    config = Config()
+    config.agents.defaults.workspace = str(tmp_path / "config-workspace")
+    bus = MagicMock()
+    bus.publish_outbound = AsyncMock()
+    seen: dict[str, object] = {}
+
+    monkeypatch.setattr("nanobot.config.loader.set_config_path", lambda _path: None)
+    monkeypatch.setattr("nanobot.config.loader.load_config", lambda _path=None: config)
+    monkeypatch.setattr("nanobot.cli.commands.sync_workspace_templates", lambda _path: None)
+    monkeypatch.setattr("nanobot.providers.factory.make_provider", lambda _config: _fake_provider())
+    monkeypatch.setattr(
+        "nanobot.providers.factory.build_provider_snapshot",
+        lambda _config: _test_provider_snapshot(object(), _config),
+    )
+    monkeypatch.setattr(
+        "nanobot.providers.factory.load_provider_snapshot",
+        lambda _config_path=None: _test_provider_snapshot(object(), config),
+    )
+    monkeypatch.setattr("nanobot.bus.queue.MessageBus", lambda: bus)
+
+    class _FakeSession:
+        def get_history(self, **kwargs):
+            seen["history_kwargs"] = kwargs
+            return [
+                {
+                    "role": "user",
+                    "content": (
+                        "[Message Time: 2026-05-18T10:00:00+08:00]\n"
+                        "明天早上提醒我带演示材料。"
+                    ),
+                },
+                {"role": "assistant", "content": "好的，我会提醒你。"},
+            ]
+
+    class _FakeSessionManager:
+        def __init__(self, _workspace: Path) -> None:
+            self.sessions = {"telegram:user-1": _FakeSession()}
+            seen["session_manager"] = self
+
+        def get_or_create(self, key: str) -> _FakeSession:
+            seen.setdefault("requested_sessions", []).append(key)
+            return self.sessions[key]
+
+    monkeypatch.setattr("nanobot.session.manager.SessionManager", _FakeSessionManager)
+
+    class _FakeCron:
+        def __init__(self, _store_path: Path) -> None:
+            self.on_job = None
+            seen["cron"] = self
+
+    class _FakeAgentLoop:
+        @classmethod
+        def from_config(cls, config, bus=None, **extra):
+            return cls()
+
+        def __init__(self) -> None:
+            self.model = "test-model"
+            self.provider = object()
+            self.tools = {}
+
+        async def process_direct(self, prompt: str, *, session_key=None, **_kwargs):
+            seen["prompt"] = prompt
+            seen["process_session_key"] = session_key
+            return OutboundMessage(channel="telegram", chat_id="user-1", content="别忘了材料。")
+
+        async def close_mcp(self) -> None:
+            return None
+
+        async def run(self) -> None:
+            return None
+
+        def stop(self) -> None:
+            return None
+
+    class _StopAfterCronSetup:
+        def __init__(self, *_args, **_kwargs) -> None:
+            raise _StopGatewayError("stop")
+
+    monkeypatch.setattr("nanobot.cron.service.CronService", _FakeCron)
+    monkeypatch.setattr("nanobot.cli.commands.AgentLoop", _FakeAgentLoop)
+    monkeypatch.setattr("nanobot.channels.manager.ChannelManager", _StopAfterCronSetup)
+
+    result = runner.invoke(app, ["gateway", "--config", str(config_file)])
+    assert isinstance(result.exception, _StopGatewayError)
+
+    cron = seen["cron"]
+    job = CronJob(
+        id="context-1",
+        name="context",
+        payload=CronPayload(
+            message="提醒我。",
+            deliver=False,
+            channel="telegram",
+            to="user-1",
+        ),
+    )
+    response = asyncio.run(cron.on_job(job))
+
+    prompt = seen["prompt"]
+    assert response == "别忘了材料。"
+    assert seen["process_session_key"] == "cron:context-1"
+    assert seen["requested_sessions"] == ["telegram:user-1"]
+    assert seen["history_kwargs"] == {
+        "max_messages": 12,
+        "max_tokens": 3500,
+        "include_timestamps": True,
+    }
+    assert "Reminder: 提醒我。" in prompt
+    assert "Relevant recent context from the target conversation" in prompt
+    assert "user: [Message Time: 2026-05-18T10:00:00+08:00]" in prompt
+    assert "明天早上提醒我带演示材料。" in prompt
+    assert "assistant: 好的，我会提醒你。" in prompt
+
+
+def test_gateway_repeating_cron_reset_clears_internal_session(
+    monkeypatch, tmp_path: Path
+) -> None:
+    config_file = tmp_path / "instance" / "config.json"
+    config_file.parent.mkdir(parents=True)
+    config_file.write_text("{}")
+
+    config = Config()
+    config.agents.defaults.workspace = str(tmp_path / "config-workspace")
+    config.gateway.reset_repeating_cron_session_history_each_run = True
+    bus = MagicMock()
+    seen: dict[str, object] = {}
+
+    monkeypatch.setattr("nanobot.config.loader.set_config_path", lambda _path: None)
+    monkeypatch.setattr("nanobot.config.loader.load_config", lambda _path=None: config)
+    monkeypatch.setattr("nanobot.cli.commands.sync_workspace_templates", lambda _path: None)
+    monkeypatch.setattr("nanobot.providers.factory.make_provider", lambda _config: _fake_provider())
+    monkeypatch.setattr(
+        "nanobot.providers.factory.build_provider_snapshot",
+        lambda _config: _test_provider_snapshot(object(), _config),
+    )
+    monkeypatch.setattr(
+        "nanobot.providers.factory.load_provider_snapshot",
+        lambda _config_path=None: _test_provider_snapshot(object(), config),
+    )
+    monkeypatch.setattr("nanobot.bus.queue.MessageBus", lambda: bus)
+
+    class _FakeSession:
+        def __init__(self) -> None:
+            self.clear_count = 0
+
+        def clear(self) -> None:
+            self.clear_count += 1
+
+    class _FakeSessionManager:
+        def __init__(self, _workspace: Path) -> None:
+            self.sessions: dict[str, _FakeSession] = {}
+            seen["session_manager"] = self
+
+        def get_or_create(self, key: str) -> _FakeSession:
+            return self.sessions.setdefault(key, _FakeSession())
+
+        def save(self, session: _FakeSession) -> None:
+            seen["saved_session"] = session
+
+    monkeypatch.setattr("nanobot.session.manager.SessionManager", _FakeSessionManager)
+
+    class _FakeCron:
+        def __init__(self, _store_path: Path) -> None:
+            self.on_job = None
+            seen["cron"] = self
+
+    class _FakeAgentLoop:
+        @classmethod
+        def from_config(cls, config, bus=None, **extra):
+            return cls(**extra)
+
+        def __init__(self, *args, **kwargs) -> None:
+            self.model = "test-model"
+            self.provider = object()
+            self.tools = {}
+
+        async def process_direct(self, *_args, session_key=None, **_kwargs):
+            seen["process_session_key"] = session_key
+            return OutboundMessage(channel="telegram", chat_id="user-1", content="Done.")
+
+        async def close_mcp(self) -> None:
+            return None
+
+        async def run(self) -> None:
+            return None
+
+        def stop(self) -> None:
+            return None
+
+    class _StopAfterCronSetup:
+        def __init__(self, *_args, **_kwargs) -> None:
+            raise _StopGatewayError("stop")
+
+    monkeypatch.setattr("nanobot.cron.service.CronService", _FakeCron)
+    monkeypatch.setattr("nanobot.cli.commands.AgentLoop", _FakeAgentLoop)
+    monkeypatch.setattr("nanobot.channels.manager.ChannelManager", _StopAfterCronSetup)
+
+    result = runner.invoke(app, ["gateway", "--config", str(config_file)])
+    assert isinstance(result.exception, _StopGatewayError)
+
+    cron = seen["cron"]
+    job = CronJob(
+        id="repeat-1",
+        name="repeat",
+        schedule=CronSchedule(kind="every", every_ms=60_000),
+        payload=CronPayload(message="Repeat quietly.", deliver=False),
+    )
+    response = asyncio.run(cron.on_job(job))
+
+    session_manager = seen["session_manager"]
+    cron_session = session_manager.sessions["cron:repeat-1"]
+    assert response == "Done."
+    assert seen["process_session_key"] == "cron:repeat-1"
+    assert cron_session.clear_count == 1
+    assert seen["saved_session"] is cron_session
 
 
 def test_gateway_cron_job_suppresses_intermediate_progress(
